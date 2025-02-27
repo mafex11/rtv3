@@ -1,5 +1,5 @@
 import React from 'react';
-import RealTimeSpeechBot from './RealTimeSpeechBot';
+import RealTimeSpeechBot from './RealTimeSpeechBot.js';
 
 function App() {
   return (

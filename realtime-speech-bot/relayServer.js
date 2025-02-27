@@ -6,6 +6,7 @@ export class RealtimeRelay {
     this.apiKey = apiKey;
     this.sockets = new WeakMap();
     this.wss = null;
+    this.maxRetries = 3;  // Maximum number of retries for OpenAI connection
   }
 
   listen(port) {
@@ -30,50 +31,78 @@ export class RealtimeRelay {
       return;
     }
 
-    // Instantiate new client
-    this.log(`Connecting with key "${this.apiKey.slice(0, 3)}..."`);
+    // Instantiate new OpenAI Realtime client
     const client = new RealtimeClient({ apiKey: this.apiKey });
-
-    // Relay: OpenAI Realtime API Event -> Browser Event
-    client.realtime.on('server.*', (event) => {
-      this.log(`Relaying "${event.type}" to Client`);
-      ws.send(JSON.stringify(event));
-    });
-    client.realtime.on('close', () => ws.close());
-
-    // Relay: Browser Event -> OpenAI Realtime API Event
     const messageQueue = [];
+    let retries = 0;
+
+    // Define the message handler
     const messageHandler = (data) => {
       try {
         const event = JSON.parse(data);
         this.log(`Relaying "${event.type}" to OpenAI`);
         client.realtime.send(event.type, event);
       } catch (e) {
-        console.error(e.message);
-        this.log(`Error parsing event from client: ${data}`);
+        this.log(`Error parsing client event: ${e.message}`);
       }
     };
+
+    // Handle messages from the client (browser)
     ws.on('message', (data) => {
       if (!client.isConnected()) {
-        messageQueue.push(data);
+        this.log(`OpenAI connection not ready. Queueing message.`);
+        messageQueue.push(data);  // Queue messages if OpenAI connection is not ready
       } else {
         messageHandler(data);
       }
     });
-    ws.on('close', () => client.disconnect());
+
+    ws.on('close', () => {
+      this.log('Client WebSocket closed');
+      client.disconnect();
+    });
+
+    // Relay: OpenAI Realtime API Event -> Browser Event
+    client.realtime.on('server.*', (event) => {
+      this.log(`Relaying "${event.type}" to Client`);
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify(event));
+      } else {
+        this.log('Client WebSocket is not open. Dropping message.');
+      }
+    });
+
+    client.realtime.on('close', () => {
+      this.log('OpenAI WebSocket closed');
+      if (retries < this.maxRetries) {
+        retries++;
+        this.log(`Retrying connection to OpenAI (${retries}/${this.maxRetries})...`);
+        this.connectToOpenAI(client, ws, messageQueue, retries);
+      } else {
+        this.log(`Max retries reached. Closing connection.`);
+        ws.close();
+      }
+    });
 
     // Connect to OpenAI Realtime API
+    this.connectToOpenAI(client, ws, messageQueue, retries);
+  }
+
+  async connectToOpenAI(client, ws, messageQueue, retries) {
     try {
-      this.log(`Connecting to OpenAI...`);
+      this.log(`Connecting to OpenAI... (attempt ${retries + 1})`);
       await client.connect();
+      this.log(`Connected to OpenAI successfully!`);
+
+      // Send any queued messages once connected
+      while (messageQueue.length) {
+        const message = messageQueue.shift();
+        this.log('Processing queued message');
+        this.messageHandler(message);
+      }
     } catch (e) {
       this.log(`Error connecting to OpenAI: ${e.message}`);
       ws.close();
-      return;
-    }
-    this.log(`Connected to OpenAI successfully!`);
-    while (messageQueue.length) {
-      messageHandler(messageQueue.shift());
     }
   }
 
